@@ -1,0 +1,190 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel RandomPosition
+#pragma kernel MoveParticle
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct WaterParticle {
+	float3 pos;
+};
+
+struct Cell {
+	int layer;
+	int isWater;
+	float pressure;
+	float3 vel;
+	float3 tempVel;
+};
+
+RWStructuredBuffer<WaterParticle> particles;
+RWStructuredBuffer<Cell> cells;
+uniform float cellWidth;
+uniform int gridSizeX;
+uniform int gridSizeY;
+uniform int gridSizeZ;
+uniform int rngStart;
+
+uniform float deltaTime;
+
+uint rand_xorshift() {
+	rngStart = (rngStart ^ 61) ^ (rngStart >> 16);
+	rngStart *= 9;
+	rngStart = rngStart ^ (rngStart >> 4);
+	rngStart *= 0x27d4eb2d;
+	rngStart = rngStart ^ (rngStart >> 15);
+	return rngStart;
+}
+
+float randomFromRNG(uint rng) {
+	return float(rand_xorshift()) * (1.0 / 4294967296.0);
+}
+
+int getCellIndex(int x, int y, int z) {
+	return (z * gridSizeX * gridSizeY) + (y * gridSizeX) + x;
+}
+
+float3 getCellCoordinates(int index) {
+	float3 pos;
+	pos.z = index / (gridSizeX * gridSizeY);
+	index -= ((int)pos.z * gridSizeX * gridSizeY);
+	pos.y = index / gridSizeX;
+	pos.x = index % gridSizeX;
+	return pos;
+}
+
+float3 getInterVel(int cellIndex, float3 particlePos) {
+	float3 cellCoords = getCellCoordinates(cellIndex);
+	float3 cellCenter = cellCoords + 0.5f;
+
+	int cellXPlusIndex;
+	int cellXMinusIndex;
+	float xLerp;
+
+	if (particlePos.x >= cellCenter.x) {
+		cellXMinusIndex = cellIndex;
+
+		if (cellCoords.x + 1 < gridSizeX) {
+			cellXPlusIndex = getCellIndex(cellCoords.x + 1, cellCoords.y, cellCoords.z);
+			xLerp = particlePos.x - cellCenter.x;
+		}
+		else {
+			cellXPlusIndex = cellIndex;
+			xLerp = 1.0f;
+		}
+	}
+	else {
+		cellXPlusIndex = cellIndex;
+
+		if (cellCoords.x - 1 >= 0) {
+			cellXMinusIndex = getCellIndex(cellCoords.x - 1, cellCoords.y, cellCoords.z);
+			xLerp = particlePos.x - (cellCenter.x - 1);
+		}
+		else {
+			cellXMinusIndex = cellIndex;
+			xLerp = 1.0f;
+		}
+	}
+
+	int cellYPlusIndex;
+	int cellYMinusIndex;
+	float yLerp;
+
+	if (particlePos.y >= cellCenter.y) {
+		cellYMinusIndex = cellIndex;
+
+		if (cellCoords.y + 1 < gridSizeY) {
+			cellYPlusIndex = getCellIndex(cellCoords.x, cellCoords.y + 1, cellCoords.z);
+			yLerp = particlePos.y - cellCenter.y;
+		}
+		else {
+			cellYPlusIndex = cellIndex;
+			yLerp = 1.0f;
+		}
+	}
+	else {
+		cellYPlusIndex = cellIndex;
+
+		if (cellCoords.y - 1 >= 0) {
+			cellYMinusIndex = getCellIndex(cellCoords.x, cellCoords.y - 1, cellCoords.z);
+			yLerp = particlePos.y - (cellCenter.y - 1);
+		}
+		else {
+			cellYMinusIndex = cellIndex;
+			yLerp = 1.0f;
+		}
+	}
+
+	int cellZPlusIndex;
+	int cellZMinusIndex;
+	float zLerp;
+
+	if (particlePos.z >= cellCenter.z) {
+		cellZMinusIndex = cellIndex;
+
+		if (cellCoords.z + 1 < gridSizeZ) {
+			cellZPlusIndex = getCellIndex(cellCoords.x, cellCoords.y, cellCoords.z + 1);
+			zLerp = particlePos.z - cellCenter.z;
+		}
+		else {
+			cellZPlusIndex = cellIndex;
+			zLerp = 1.0f;
+		}
+	}
+	else {
+		cellZPlusIndex = cellIndex;
+
+		if (cellCoords.z - 1 >= 0) {
+			cellZMinusIndex = getCellIndex(cellCoords.x, cellCoords.y, cellCoords.z - 1);
+			zLerp = particlePos.z - (cellCenter.z - 1);
+		}
+		else {
+			cellZMinusIndex = cellIndex;
+			zLerp = 1.0f;
+		}
+	}
+
+	float3 interpolatedVel;
+	interpolatedVel.x = cells[cellXMinusIndex].vel.x * (1.0f - xLerp) + cells[cellXPlusIndex].vel.x * xLerp;
+	interpolatedVel.y = cells[cellYMinusIndex].vel.y * (1.0f - yLerp) + cells[cellYPlusIndex].vel.y * yLerp;
+	interpolatedVel.z = cells[cellZMinusIndex].vel.z * (1.0f - zLerp) + cells[cellZPlusIndex].vel.z * zLerp;
+	return interpolatedVel;
+}
+
+[numthreads(64, 1, 1)]
+void RandomPosition(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+	rngStart += id.x;
+	float3 pos;
+	pos.x = (randomFromRNG(rngStart) * 2) * cellWidth * (gridSizeX - 1);
+	pos.y = (randomFromRNG(rngStart) * 2) * cellWidth * (gridSizeY - 1);
+	pos.z = (randomFromRNG(rngStart) * 2) * cellWidth * (gridSizeZ - 1);
+	particles[id.x].pos = pos;
+}
+
+[numthreads(64, 1, 1)]
+void MoveParticle(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+	WaterParticle particle = particles[id.x];
+
+	int cellIndex = getCellIndex(particle.pos.x, particle.pos.y, particle.pos.z);
+
+	float3 interVel = getInterVel(cellIndex, particle.pos);
+
+	float3 rungeKuttaPos = particle.pos + (deltaTime / 2.0f) * interVel;
+
+	float3 newVel;
+	if (rungeKuttaPos.x < 0 || rungeKuttaPos.x >= gridSizeX || rungeKuttaPos.y < 0 || rungeKuttaPos.y >= gridSizeY || rungeKuttaPos.z < 0 || rungeKuttaPos.z >= gridSizeZ) {
+		newVel = interVel;
+	}
+	else {
+		newVel = getInterVel(getCellIndex(rungeKuttaPos.x, rungeKuttaPos.y, rungeKuttaPos.z), rungeKuttaPos);
+	}
+
+	particle.pos += deltaTime * newVel;
+	particles[id.x].pos.x = clamp(particle.pos.x, 0, (gridSizeX-1) * cellWidth);
+	particles[id.x].pos.y = clamp(particle.pos.y, 0, (gridSizeY-1) * cellWidth);
+	particles[id.x].pos.z = clamp(particle.pos.z, 0, (gridSizeZ-1) * cellWidth);
+}

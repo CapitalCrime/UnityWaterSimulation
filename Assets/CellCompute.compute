@@ -1,0 +1,222 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel SetAllAir
+#pragma kernel SetParticleCellToWater
+#pragma kernel SwapVel
+#pragma kernel PressureSetup
+#pragma kernel PressureCopy
+#pragma kernel SetSolidVel
+#pragma kernel SetXVecToZero
+#pragma kernel GaussSeidelPressure
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+struct Cell {
+	int layer;
+	int isWater;
+	float pressure;
+	float3 vel;
+	float3 tempVel;
+};
+
+struct WaterParticle
+{
+	float3 pos;
+};
+
+RWStructuredBuffer<Cell> cells;
+RWStructuredBuffer<float3> presVecX;
+RWStructuredBuffer<WaterParticle> particles;
+
+RWStructuredBuffer<float> gridaBuffer;
+RWStructuredBuffer<int> gridcolABuffer;
+RWStructuredBuffer<float> gridxBuffer;
+RWStructuredBuffer<float> gridbBuffer;
+uniform int level;
+uniform int numCells;
+uniform int sizeX;
+uniform int sizeY;
+uniform int sizeZ;
+
+uniform float deltaTime;
+uniform float cellWidth;
+uniform int gridSizeX;
+uniform int gridSizeY;
+uniform int gridSizeZ;
+
+uniform float fluidDensity;
+uniform float airDensity;
+uniform float atmoPressure;
+
+[numthreads(64,1,1)]
+void SetAllAir(uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+	cells[id.x].isWater = 0;
+	cells[id.x].layer = -1;
+}
+
+int getCellIndex(int x, int y, int z) {
+	return (z * gridSizeX * gridSizeY) + (y * gridSizeX) + x;
+}
+
+float3 getCellCoordinates(int index) {
+	float3 pos;
+	pos.z = index / (gridSizeX * gridSizeY);
+	index -= ((int)pos.z * gridSizeX * gridSizeY);
+	pos.y = index / gridSizeX;
+	pos.x = index % gridSizeX;
+	return pos;
+}
+
+[numthreads(64, 1, 1)]
+void SetParticleCellToWater(uint3 id : SV_DispatchThreadID)
+{
+	int cellIndex = getCellIndex(particles[id.x].pos.x / cellWidth, particles[id.x].pos.y / cellWidth, particles[id.x].pos.z / cellWidth);
+	cells[cellIndex].isWater = 1;
+	cells[cellIndex].layer = 0;
+	// TODO: insert actual code here!
+
+}
+
+[numthreads(64, 1, 1)]
+void SwapVel(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+	cells[id.x].vel = cells[id.x].tempVel;
+}
+
+[numthreads(64, 1, 1)]
+void PressureSetup(uint3 id : SV_DispatchThreadID)
+{
+	float3 cellPos = getCellCoordinates(id.x);
+
+	float nonSolid = 0.0f;
+	float airCells = 0.0f;
+
+	for (int i = 0; i < 6; i++) {
+		const int x = i == 0 ? -1 : i == 1 ? 1 : 0;
+		const int y = i == 2 ? -1 : i == 3 ? 1 : 0;
+		const int z = i == 4 ? -1 : i == 5 ? 1 : 0;
+
+		if (cellPos.x + x < 0 || cellPos.x + x >= sizeX || cellPos.y + y < 0 || cellPos.y + y >= sizeY || cellPos.z + z < 0 || cellPos.z + z >= sizeZ) {
+			gridcolABuffer[id.x * 6 + i] = -1;
+			continue;
+		}
+
+		const int adj = getCellIndex(cellPos.x + x, cellPos.y + y, cellPos.z + z);
+
+		nonSolid++;
+
+		if (cells[adj].isWater == 0) {
+			gridcolABuffer[id.x * 6 + i] = -1;
+			gridaBuffer[id.x * 7 + i + 1] = 0.0f;
+			airCells++;
+			continue;
+		}
+
+		gridcolABuffer[id.x * 6 + i] = adj;
+		gridaBuffer[id.x * 7 + i + 1] = 1.0f;
+	}
+
+	gridaBuffer[id.x * 7] = -nonSolid;
+
+	float divU = 0.0f;
+	Cell cell = cells[id.x];
+
+	float divPlus = 0.0f;
+	float divMinus = 0.0f;
+
+	if (cellPos.x + 1 < sizeX) {
+		divPlus = 0.5f * (cell.vel.x + cells[id.x + 1].vel.x);
+	}
+	if (cellPos.x - 1 >= 0) {
+		divMinus = 0.5f * (cell.vel.x + cells[id.x - 1].vel.x);
+	}
+
+	divU += (divPlus - divMinus);
+
+	divPlus = 0.0f;
+	divMinus = 0.0f;
+
+	if (cellPos.y + 1 < sizeY) {
+		divPlus = 0.5f * (cell.vel.y + cells[id.x + sizeX].vel.y);
+	}
+	if (cellPos.y - 1 >= 0) {
+		divMinus = 0.5f * (cell.vel.y + cells[id.x - sizeX].vel.y);
+	}
+
+	divU += (divPlus - divMinus);
+
+	divPlus = 0.0f;
+	divMinus = 0.0f;
+
+	if (cellPos.z + 1 < sizeZ) {
+		divPlus = 0.5f * (cell.vel.z + cells[id.x + sizeX * sizeY].vel.z);
+	}
+	if (cellPos.z - 1 >= 0) {
+		divMinus = 0.5f * (cell.vel.z + cells[id.x - sizeX * sizeY].vel.z);
+	}
+
+	divU += (divPlus - divMinus);
+	divU /= cellWidth;
+
+	gridbBuffer[id.x] = divU * (cell.isWater == 1 ? fluidDensity : airDensity) / (deltaTime-(atmoPressure * airCells));
+}
+
+[numthreads(64, 1, 1)]
+void SetXVecToZero(uint3 id : SV_DispatchThreadID) {
+	gridxBuffer[id.x] = 0.0f;
+}
+
+[numthreads(64, 1, 1)]
+void GaussSeidelPressure(uint3 id : SV_DispatchThreadID) {
+	float ans = gridbBuffer[id.x];
+	for (int j = 0; j < 6; j++) {
+		if (gridcolABuffer[id.x * 6 + j] != -1) {
+			ans -= gridaBuffer[id.x * 7 + j + 1] * gridxBuffer[gridcolABuffer[id.x * 6 + j]];
+		}
+	}
+
+	gridxBuffer[id.x] = ans / gridaBuffer[id.x * 7];
+}
+
+[numthreads(64, 1, 1)]
+void PressureCopy(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+	if (cells[id.x].isWater == 0) {
+		cells[id.x].pressure = atmoPressure;
+	}
+	else {
+		cells[id.x].pressure = gridxBuffer[id.x];
+	}
+}
+
+[numthreads(64, 1, 1)]
+void SetSolidVel(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+	float3 cellPos = getCellCoordinates(id.x);
+	Cell cell = cells[id.x];
+
+	if (cellPos.x == gridSizeX - 1 && cell.vel.x > 0) {
+		cells[id.x].vel.x = 0.0f;
+	}
+	if (cellPos.x == 0 && cell.vel.x < 0) {
+		cells[id.x].vel.x = 0.0f;
+	}
+
+	if (cellPos.y == gridSizeY - 1 && cell.vel.y > 0) {
+		cells[id.x].vel.y = 0.0f;
+	}
+	if (cellPos.y < 0 && cell.vel.y < 0) {
+		cells[id.x].vel.y = 0.0f;
+	}
+
+	if (cellPos.z == gridSizeZ - 1 && cell.vel.z > 0) {
+		cells[id.x].vel.z = 0.0f;
+	}
+	if (cellPos.z == 0 && cell.vel.z < 0) {
+		cells[id.x].vel.z = 0.0f;
+	}
+}

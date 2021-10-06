@@ -1,0 +1,340 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel ConvectionCalc
+#pragma kernel ExternalForceCalc
+#pragma kernel ViscosityCalc
+#pragma kernel PressureApply
+#pragma kernel ExtrapolateVelocity
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct Cell {
+	int layer;
+	int isWater;
+	float pressure;
+	float3 vel;
+	float3 tempVel;
+};
+
+RWStructuredBuffer<Cell> cells;
+uniform float deltaTime;
+uniform int layer;
+
+uniform float cellWidth;
+uniform uint gridSizeX;
+uniform int gridSizeY;
+uniform int gridSizeZ;
+
+uniform float visVal;
+
+uniform int fluidDensity;
+uniform int airDensity;
+
+uniform float gravity;
+
+float3 getCellCoordinates(int index) {
+	float3 pos;
+	pos.z = index / (gridSizeX * gridSizeY);
+	index -= ((int)pos.z * gridSizeX * gridSizeY);
+	pos.y = index / gridSizeX;
+	pos.x = index % gridSizeX;
+	return pos;
+}
+
+int getCellIndex(int x, int y, int z) {
+	return (z * gridSizeX * gridSizeY) + (y * gridSizeX) + x;
+}
+
+float3 getInterVel(int cellIndex, float3 particlePos) {
+	float3 cellCoords = getCellCoordinates(cellIndex);
+	float3 cellCenter = cellCoords + 0.5f;
+
+	int cellXPlusIndex;
+	int cellXMinusIndex;
+	float xLerp;
+
+	if (particlePos.x >= cellCenter.x) {
+		cellXMinusIndex = cellIndex;
+
+		if (cellCoords.x + 1 < gridSizeX) {
+			cellXPlusIndex = getCellIndex(cellCoords.x + 1, cellCoords.y, cellCoords.z);
+			xLerp = particlePos.x - cellCenter.x;
+		} else {
+			cellXPlusIndex = cellIndex;
+			xLerp = 1.0f;
+		}
+	}
+	else {
+		cellXPlusIndex = cellIndex;
+
+		if (cellCoords.x - 1 >= 0) {
+			cellXMinusIndex = getCellIndex(cellCoords.x - 1, cellCoords.y, cellCoords.z);
+			xLerp = particlePos.x - (cellCenter.x-1);
+		}
+		else {
+			cellXMinusIndex = cellIndex;
+			xLerp = 1.0f;
+		}
+	}
+
+	int cellYPlusIndex;
+	int cellYMinusIndex;
+	float yLerp;
+
+	if (particlePos.y >= cellCenter.y) {
+		cellYMinusIndex = cellIndex;
+
+		if (cellCoords.y + 1 < gridSizeY) {
+			cellYPlusIndex = getCellIndex(cellCoords.x, cellCoords.y+1, cellCoords.z);
+			yLerp = particlePos.y - cellCenter.y;
+		}
+		else {
+			cellYPlusIndex = cellIndex;
+			yLerp = 1.0f;
+		}
+	}
+	else {
+		cellYPlusIndex = cellIndex;
+
+		if (cellCoords.y - 1 >= 0) {
+			cellYMinusIndex = getCellIndex(cellCoords.x, cellCoords.y-1, cellCoords.z);
+			yLerp = particlePos.y - (cellCenter.y - 1);
+		}
+		else {
+			cellYMinusIndex = cellIndex;
+			yLerp = 1.0f;
+		}
+	}
+
+	int cellZPlusIndex;
+	int cellZMinusIndex;
+	float zLerp;
+
+	if (particlePos.z >= cellCenter.z) {
+		cellZMinusIndex = cellIndex;
+
+		if (cellCoords.z + 1 < gridSizeZ) {
+			cellZPlusIndex = getCellIndex(cellCoords.x, cellCoords.y, cellCoords.z+1);
+			zLerp = particlePos.z - cellCenter.z;
+		}
+		else {
+			cellZPlusIndex = cellIndex;
+			zLerp = 1.0f;
+		}
+	}
+	else {
+		cellZPlusIndex = cellIndex;
+
+		if (cellCoords.z - 1 >= 0) {
+			cellZMinusIndex = getCellIndex(cellCoords.x, cellCoords.y, cellCoords.z-1);
+			zLerp = particlePos.z - (cellCenter.z - 1);
+		}
+		else {
+			cellZMinusIndex = cellIndex;
+			zLerp = 1.0f;
+		}
+	}
+
+	float3 interpolatedVel;
+	interpolatedVel.x = cells[cellXMinusIndex].vel.x * (1.0f - xLerp) + cells[cellXPlusIndex].vel.x * xLerp;
+	interpolatedVel.y = cells[cellYMinusIndex].vel.y * (1.0f - yLerp) + cells[cellYPlusIndex].vel.y * yLerp;
+	interpolatedVel.z = cells[cellZMinusIndex].vel.z * (1.0f - zLerp) + cells[cellZPlusIndex].vel.z * zLerp;
+	return interpolatedVel;
+}
+
+[numthreads(64, 1, 1)]
+void ConvectionCalc(uint3 id : SV_DispatchThreadID) {
+	float3 cellPosition = (getCellCoordinates(id.x) / cellWidth) + float3(0.5f, 0.5f, 0.5f);
+	float3 rungeKuttaPosition = cellPosition - cells[id.x].vel * (deltaTime / 2.0f);
+
+	float3 interVel;
+	if (rungeKuttaPosition.x < 0 || rungeKuttaPosition.x >= gridSizeX || rungeKuttaPosition.y < 0 || rungeKuttaPosition.y >= gridSizeY || rungeKuttaPosition.z < 0 || rungeKuttaPosition.z >= gridSizeZ) {
+		interVel = cells[id.x].vel;
+	}
+	else {
+		interVel = getInterVel(getCellIndex(rungeKuttaPosition.x, rungeKuttaPosition.y, rungeKuttaPosition.z), rungeKuttaPosition);
+	}
+
+	float3 oldPos = cellPosition + deltaTime * interVel;
+
+	if (oldPos.x < 0 || oldPos.x >= gridSizeX || oldPos.y < 0 || oldPos.y >= gridSizeY || oldPos.z < 0 || oldPos.z >= gridSizeZ) {
+		return;
+	}
+
+	int prevCellIndex = getCellIndex(oldPos.x, oldPos.y, oldPos.z);
+	cells[id.x].tempVel = cells[prevCellIndex].vel;
+}
+
+[numthreads(64, 1, 1)]
+void ExternalForceCalc(uint3 id : SV_DispatchThreadID) {
+	float3 cellPos = getCellCoordinates(id.x);
+	if (cells[id.x].isWater == 1) {
+		cells[id.x].tempVel = cells[id.x].vel + float3(0, -gravity * deltaTime, 0);
+	}
+	else {
+		cells[id.x].tempVel = cells[id.x].vel;
+	}
+}
+
+[numthreads(64, 1, 1)]
+void ViscosityCalc(uint3 id : SV_DispatchThreadID) {
+
+	if (cells[id.x].isWater == 0) {
+		cells[id.x].tempVel = cells[id.x].vel;
+		return;
+	}
+
+	float3 coords = getCellCoordinates(id.x);
+
+	float3 laplace = float3(0,0,0);
+
+	int count = 0;
+
+	if (coords.x + 1 < gridSizeX) {
+		int adj = getCellIndex(coords.x + 1, coords.y, coords.z);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	if (coords.x - 1 >= 0) {
+		int adj = getCellIndex(coords.x - 1, coords.y, coords.z);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	if (coords.y + 1 < gridSizeY) {
+		int adj = getCellIndex(coords.x, coords.y+1, coords.z);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	if (coords.y - 1 >= 0) {
+		int adj = getCellIndex(coords.x, coords.y-1, coords.z);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	if (coords.z + 1 < gridSizeZ) {
+		int adj = getCellIndex(coords.x, coords.y, coords.z+1);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	if (coords.z - 1 >= 0) {
+		int adj = getCellIndex(coords.x, coords.y, coords.z-1);
+
+		if (cells[adj].isWater == 1) {
+			count++;
+
+			laplace.x += cells[adj].vel.x;
+			laplace.y += cells[adj].vel.y;
+			laplace.z += cells[adj].vel.z;
+		}
+	}
+
+	laplace -= count * cells[id.x].vel;
+
+	cells[id.x].tempVel = cells[id.x].vel + (deltaTime * visVal * laplace);
+}
+
+[numthreads(64, 1, 1)]
+void PressureApply(uint3 id : SV_DispatchThreadID) {
+	if (cells[id.x].isWater == 1) {
+		float3 cellPos = getCellCoordinates(id.x);
+		float3 deltaPressure = float3(0, 0, 0);
+
+		if (cellPos.x + 1 < gridSizeX) {
+			deltaPressure.x += cells[id.x + 1].pressure;
+		}
+		if (cellPos.x - 1 >= 0) {
+			deltaPressure.x -= cells[id.x - 1].pressure;
+		}
+
+		if (cellPos.y + 1 < gridSizeY) {
+			deltaPressure.y += cells[id.x + gridSizeX].pressure;
+		}
+		if (cellPos.y - 1 >= 0) {
+			deltaPressure.y -= cells[id.x - gridSizeX].pressure;
+		}
+
+		if (cellPos.z + 1 < gridSizeZ) {
+			deltaPressure.z += cells[id.x + (gridSizeX * gridSizeY)].pressure;
+		}
+		if (cellPos.z - 1 >= 0) {
+			deltaPressure.z -= cells[id.x - (gridSizeX * gridSizeY)].pressure;
+		}
+
+		cells[id.x].tempVel = cells[id.x].vel - deltaPressure * deltaTime / ((cells[id.x].isWater == 1 ? fluidDensity : airDensity) * cellWidth);
+	}
+	else {
+		cells[id.x].pressure = 1.0f;
+	}
+}
+
+[numthreads(64, 1, 1)]
+void ExtrapolateVelocity(uint3 id : SV_DispatchThreadID) {
+	float3 cellPos = getCellCoordinates(id.x);
+
+	float3 avVel = float3(0, 0, 0);
+	int count = 0;
+
+	if (cells[id.x].layer == -1) {
+		for (int d = 0; d < 6; d++) {
+			int x = d == 0 ? -1 : d == 1 ? 1 : 0;
+			int y = d == 2 ? -1 : d == 3 ? 1 : 0;
+			int z = d == 4 ? -1 : d == 5 ? 1 : 0;
+
+			if (cellPos.x + x >= 0 && cellPos.x + x < gridSizeX && cellPos.y + y >= 0 && cellPos.y + y < gridSizeY && cellPos.z + z >= 0 && cellPos.z + z < gridSizeZ) {
+				int adjCell = getCellIndex(cellPos.x + x, cellPos.y + y, cellPos.z + z);
+
+				if (cells[adjCell].layer == layer - 1 && cells[adjCell].isWater == 0) {
+					avVel += cells[adjCell].vel;
+					count++;
+				}
+			}
+		}
+
+		cells[id.x].layer = layer;
+
+		if (count == 0) {
+			cells[id.x].tempVel = cells[id.x].vel;
+		}
+		else {
+			cells[id.x].tempVel = (avVel) / (float(count));
+		}
+	}
+	else {
+		cells[id.x].tempVel = cells[id.x].vel;
+	}
+
+}
